@@ -1,0 +1,268 @@
+# Builds goose-client and goose-server for the architectures shipped by
+# OpenWrt 23.05 / 24.10 (and SNAPSHOT) where upstream Go can cross-compile.
+#
+# Design notes:
+#   * Runs in parallel with .github/workflows/release.yml on the same v* tag.
+#     softprops/action-gh-release@v2 appends to the existing release, so the
+#     OpenWrt assets land next to the desktop/mobile assets produced by
+#     release.yml. release.yml owns `generate_release_notes`; this workflow
+#     does not set it to avoid double-generation.
+#   * Archive naming mirrors release.yml: GooseRelayVPN-{client,server}-
+#     <VERSION>-openwrt-<openwrt_arch>.tar.gz — same prefix/version, with the
+#     OpenWrt arch as the platform suffix.
+#   * A separate SHA256SUMS-openwrt.txt is published so we never clobber the
+#     SHA256SUMS.txt that release.yml generates.
+#   * Architectures skipped: powerpc_* and arc_* (Go upstream does not target
+#     32-bit PowerPC or Synopsys ARC).
+
+name: OpenWrt Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build for and attach assets to (e.g. v1.6.0).'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build openwrt-${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- 32-bit MIPS (big-endian) -----------------------------------
+          # ath79, lantiq/xrx200, bcm63xx, ar71xx-legacy, etc.
+          - platform: mips_24kc
+            goos: linux
+            goarch: mips
+            gomips: softfloat
+          - platform: mips_4kec
+            goos: linux
+            goarch: mips
+            gomips: softfloat
+          - platform: mips_mips32
+            goos: linux
+            goarch: mips
+            gomips: softfloat
+          - platform: mips_74kc
+            goos: linux
+            goarch: mips
+            gomips: softfloat
+
+          # ---- 32-bit MIPS (little-endian) --------------------------------
+          # ramips (rt305x/mt7620/mt7621 — note mt7621 is mipsel_24kc), realtek.
+          - platform: mipsel_24kc
+            goos: linux
+            goarch: mipsle
+            gomips: softfloat
+          - platform: mipsel_74kc
+            goos: linux
+            goarch: mipsle
+            gomips: softfloat
+          - platform: mipsel_mips32
+            goos: linux
+            goarch: mipsle
+            gomips: softfloat
+
+          # ---- 64-bit MIPS ------------------------------------------------
+          # Cavium Octeon and similar. These SoCs have FPUs, so hardfloat.
+          - platform: mips64_octeonplus
+            goos: linux
+            goarch: mips64
+            gomips64: hardfloat
+          - platform: mips64_mips64
+            goos: linux
+            goarch: mips64
+            gomips64: hardfloat
+          - platform: mips64el_mips64
+            goos: linux
+            goarch: mips64le
+            gomips64: hardfloat
+
+          # ---- ARMv5 ------------------------------------------------------
+          # kirkwood, oxnas.
+          - platform: arm_arm926ej-s
+            goos: linux
+            goarch: arm
+            goarm: '5'
+          # Intel XScale (ixp4xx). ARMv5TE — Go's GOARM=5 is the closest fit.
+          - platform: arm_xscale
+            goos: linux
+            goarch: arm
+            goarm: '5'
+
+          # ---- ARMv6 ------------------------------------------------------
+          # bcm27xx legacy (Raspberry Pi 1 / Zero).
+          - platform: arm_arm1176jzf-s_vfp
+            goos: linux
+            goarch: arm
+            goarm: '6'
+
+          # ---- ARMv7 ------------------------------------------------------
+          # mvebu, sunxi, ipq40xx, ipq806x, at91, am335x, apm821xx, ...
+          - platform: arm_cortex-a5_vfpv4
+            goos: linux
+            goarch: arm
+            goarm: '7'
+          - platform: arm_cortex-a7
+            goos: linux
+            goarch: arm
+            goarm: '7'
+          - platform: arm_cortex-a7_neon-vfpv4
+            goos: linux
+            goarch: arm
+            goarm: '7'
+          - platform: arm_cortex-a8_vfpv3
+            goos: linux
+            goarch: arm
+            goarm: '7'
+          - platform: arm_cortex-a9
+            goos: linux
+            goarch: arm
+            goarm: '7'
+          - platform: arm_cortex-a9_neon
+            goos: linux
+            goarch: arm
+            goarm: '7'
+          - platform: arm_cortex-a9_vfpv3-d16
+            goos: linux
+            goarch: arm
+            goarm: '7'
+          - platform: arm_cortex-a15_neon-vfpv4
+            goos: linux
+            goarch: arm
+            goarm: '7'
+
+          # ---- AArch64 ----------------------------------------------------
+          # mt7622, mt7986, ipq807x, mvebu (Armada A8K), bcm2711, rockchip, ...
+          - platform: aarch64_generic
+            goos: linux
+            goarch: arm64
+          - platform: aarch64_cortex-a53
+            goos: linux
+            goarch: arm64
+          - platform: aarch64_cortex-a72
+            goos: linux
+            goarch: arm64
+          - platform: aarch64_cortex-a76
+            goos: linux
+            goarch: arm64
+
+          # ---- x86 --------------------------------------------------------
+          - platform: x86_64
+            goos: linux
+            goarch: amd64
+          - platform: i386_pentium4
+            goos: linux
+            goarch: '386'
+            go386: sse2
+          # pentium-mmx predates SSE2 — use the soft-float 387 ABI.
+          - platform: i386_pentium-mmx
+            goos: linux
+            goarch: '386'
+            go386: softfloat
+
+          # ---- RISC-V & LoongArch -----------------------------------------
+          - platform: riscv64_riscv64
+            goos: linux
+            goarch: riscv64
+          - platform: loongarch64_generic
+            goos: linux
+            goarch: loong64
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.tag }}" ]; then
+            VERSION="${{ inputs.tag }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          echo "version=${VERSION}" >>"$GITHUB_OUTPUT"
+
+      - name: Build binaries
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
+          GOMIPS64: ${{ matrix.gomips64 }}
+          GO386: ${{ matrix.go386 }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          PLATFORM="openwrt-${{ matrix.platform }}"
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+
+          CLIENT_NAME="GooseRelayVPN-client-${VERSION}-${PLATFORM}"
+          SERVER_NAME="GooseRelayVPN-server-${VERSION}-${PLATFORM}"
+
+          mkdir -p "dist/$CLIENT_NAME" "dist/$SERVER_NAME"
+
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o "dist/$CLIENT_NAME/goose-client" ./cmd/client
+          cp client_config.example.json "dist/$CLIENT_NAME/"
+
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o "dist/$SERVER_NAME/goose-server" ./cmd/server
+          cp server_config.example.json "dist/$SERVER_NAME/"
+
+          ( cd dist && \
+            tar -czf "${CLIENT_NAME}.tar.gz" "$CLIENT_NAME" && \
+            tar -czf "${SERVER_NAME}.tar.gz" "$SERVER_NAME" )
+          ls -lh dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-${{ matrix.platform }}
+          path: dist/GooseRelayVPN-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Attach OpenWrt assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: openwrt-*
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS-openwrt.txt
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f -name 'GooseRelayVPN-*-openwrt-*.tar.gz' \
+            -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS-openwrt.txt
+          cat SHA256SUMS-openwrt.txt
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            dist/GooseRelayVPN-*-openwrt-*.tar.gz
+            dist/SHA256SUMS-openwrt.txt
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
