@@ -426,6 +426,117 @@ nano client_config.json
 
 ---
 
+## نصب روی OpenWrt
+
+GooseRelayVPN روی روترهای [OpenWrt](https://openwrt.org) اجرا می‌شود، بنابراین کل LAN می‌تواند از تونل استفاده کند بدون اینکه روی هر دستگاه پروکسی تنظیم شود. بسته ریلیز برای همه معماری‌های رایج OpenWrt باینری آماده `goose-client` دارد (mips، mipsel، arm v5/v6/v7، aarch64، x86_64، riscv64، loongarch64). OpenWrt به جای systemd از **procd** استفاده می‌کند — اسکریپت سرویس زیر معادل procd‑ای همان یونیت systemd مرحلهٔ ۸ است.
+
+> 💡 فقط **کلاینت** قرار است روی روتر اجرا شود. سرور خروج (exit) همچنان مثل مرحلهٔ ۷ روی VPS می‌ماند.
+
+**۱. معماری روتر را پیدا کنید.**
+
+با SSH وارد روتر شوید و اجرا کنید:
+```sh
+opkg print-architecture | awk '/^arch / && $2 != "all" && $2 != "noarch" { print $2 }' | tail -n1
+```
+خروجی چیزی شبیه `mips_24kc`، `aarch64_cortex-a53` یا `arm_cortex-a7_neon-vfpv4` خواهد بود. از همان رشته برای انتخاب آرشیو درست از [صفحهٔ Releases](https://github.com/kianmhz/GooseRelayVPN/releases) استفاده کنید: `GooseRelayVPN-client-vX.Y.Z-openwrt-<arch>.tar.gz`.
+
+**۲. کپی باینری و کانفیگ روی روتر.**
+
+از کامپیوتر خودتان (مقادیر `vX.Y.Z`، معماری و `192.168.1.1` را با مقادیر خودتان جایگزین کنید):
+```bash
+ARCH=mips_24kc
+VER=vX.Y.Z
+curl -LO https://github.com/kianmhz/GooseRelayVPN/releases/download/${VER}/GooseRelayVPN-client-${VER}-openwrt-${ARCH}.tar.gz
+tar -xzf GooseRelayVPN-client-${VER}-openwrt-${ARCH}.tar.gz
+cd GooseRelayVPN-client-${VER}-openwrt-${ARCH}
+
+scp goose-client root@192.168.1.1:/usr/bin/goose-client
+ssh root@192.168.1.1 "mkdir -p /etc/goose"
+scp client_config.example.json root@192.168.1.1:/etc/goose/client_config.json
+```
+
+> ⚠️ **روترهای با فلش کم (۸ تا ۱۶ مگابایت):** حجم باینری بسته به معماری حدود ۸ تا ۱۲ مگابایت است و ممکن است در فلش داخلی جا نشود. یک USB استیک سوار کنید (مثلاً `/mnt/sda1`)، `goose-client` و `client_config.json` را آنجا بگذارید، و سپس مسیرها را داخل اسکریپت init مرحلهٔ ۵ به‌روز کنید.
+
+**۳. ویرایش کانفیگ روی روتر:**
+```sh
+ssh root@192.168.1.1
+vi /etc/goose/client_config.json
+```
+`script_keys` و `tunnel_key` را از Apps Script و راه‌اندازی سرور (مراحل ۴ و ۵ راهنمای اصلی) پر کنید.
+
+به‌صورت پیش‌فرض listener پروتکل SOCKS روی `127.0.0.1:1080` گوش می‌دهد. برای در دسترس قرار دادن آن در LAN، مقدار `socks_host` را به `0.0.0.0` تغییر دهید (همان نکات بخش اشتراک‌گذاری LAN در ادامه صدق می‌کند).
+
+**۴. قبل از نصب به‌عنوان سرویس، باینری را دستی تست کنید:**
+```sh
+chmod +x /usr/bin/goose-client
+/usr/bin/goose-client -config /etc/goose/client_config.json
+```
+وقتی پیام `ready: local SOCKS5 is listening on …` را دیدید یعنی تونل بالا است. با Ctrl+C متوقفش کنید و به مرحلهٔ سرویس procd بروید.
+
+**۵. نصب اسکریپت init مخصوص procd.**
+
+روی روتر، فایل `/etc/init.d/goose-client` را بسازید:
+```sh
+cat > /etc/init.d/goose-client <<'EOF'
+#!/bin/sh /etc/rc.common
+# GooseRelayVPN client (managed by procd)
+
+USE_PROCD=1
+START=95
+STOP=01
+
+PROG=/usr/bin/goose-client
+CONFIG=/etc/goose/client_config.json
+
+start_service() {
+    procd_open_instance
+    procd_set_param command "$PROG" -config "$CONFIG"
+    # Respawn: within a 3600s window, wait 5s between restarts, retry forever (0 = unlimited).
+    procd_set_param respawn 3600 5 0
+    # Send stdout/stderr to the system log so `logread` can show them.
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param pidfile /var/run/goose-client.pid
+    procd_close_instance
+}
+
+reload_service() {
+    stop
+    start
+}
+EOF
+chmod +x /etc/init.d/goose-client
+```
+
+**۶. فعال‌سازی و اجرای سرویس:**
+```sh
+/etc/init.d/goose-client enable      # اجرای خودکار با ریبوت
+/etc/init.d/goose-client start
+```
+
+از این به بعد همهٔ دستورات استاندارد procd کار می‌کنند:
+```sh
+/etc/init.d/goose-client start       # شروع
+/etc/init.d/goose-client stop        # توقف
+/etc/init.d/goose-client restart     # توقف + شروع
+/etc/init.d/goose-client reload      # بارگذاری مجدد کانفیگ (در عمل stop + start)
+/etc/init.d/goose-client status      # وضعیت در حال اجرا یا متوقف
+/etc/init.d/goose-client disable     # حذف از boot
+```
+
+**۷. مشاهده لاگ‌ها:**
+```sh
+logread -e goose-client              # همهٔ خطوط لاگ کلاینت تا الان
+logread -f -e goose-client           # دنبال کردن زنده
+```
+بعد از هر ریبوت، سرویس به‌صورت خودکار اجرا می‌شود (به‌خاطر symlink ای که `enable` در `/etc/rc.d/` می‌سازد) و اگر هرگاه فرایند بمیرد، procd آن را در ۵ ثانیه دوباره راه می‌اندازد.
+
+**۸. اتصال کلاینت‌های LAN به تونل.**
+
+با `socks_host: "0.0.0.0"`، هر دستگاهی در LAN می‌تواند مستقیماً از `socks5://<router-ip>:1080` استفاده کند. برای یک پیکربندی کاملاً transparent (هدایت اجباری همهٔ اتصالات از تونل بدون تنظیم در هر دستگاه)، این را با یک پکیج transparent-proxy مثل [redsocks](https://openwrt.org/packages/pkgdata/redsocks) یا یک ست قوانین transparent در sing-box / v2ray ترکیب کنید — اینها خارج از حوصلهٔ این راهنما هستند.
+
+---
+
 ## اشتراک‌گذاری LAN (اختیاری)
 
 به‌صورت پیش‌فرض کلاینت روی `127.0.0.1:1080` گوش می‌دهد، پس فقط کامپیوتر شما می‌تواند استفاده کند. برای اشتراک در شبکه محلی، `socks_host` را در `client_config.json` به `0.0.0.0` تغییر دهید و کلاینت را ری‌استارت کنید.

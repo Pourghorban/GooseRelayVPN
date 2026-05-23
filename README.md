@@ -424,6 +424,117 @@ Use a SOCKS5-aware app to route traffic through `127.0.0.1:1080`. [NekoBox](http
 
 ---
 
+## OpenWrt Installation
+
+GooseRelayVPN runs on routers with [OpenWrt](https://openwrt.org), so the whole LAN can use the tunnel without per-device proxy settings. The release ships pre-built `goose-client` binaries for every common OpenWrt architecture (mips, mipsel, arm v5/v6/v7, aarch64, x86_64, riscv64, loongarch64). OpenWrt uses **procd**, not systemd — the service definition below is the procd-native equivalent of the systemd unit in Step 8.
+
+> 💡 Only the **client** is meant to run on the router. The exit server still lives on your VPS as in Step 7.
+
+**1. Find your router's architecture.**
+
+SSH into the router and run:
+```sh
+opkg print-architecture | awk '/^arch / && $2 != "all" && $2 != "noarch" { print $2 }' | tail -n1
+```
+This prints something like `mips_24kc`, `aarch64_cortex-a53`, or `arm_cortex-a7_neon-vfpv4`. Use that string to pick the matching tarball from the [Releases page](https://github.com/kianmhz/GooseRelayVPN/releases): `GooseRelayVPN-client-vX.Y.Z-openwrt-<arch>.tar.gz`.
+
+**2. Copy the binary and config to the router.**
+
+From your computer (replace `vX.Y.Z`, the architecture, and `192.168.1.1` with your values):
+```bash
+ARCH=mips_24kc
+VER=vX.Y.Z
+curl -LO https://github.com/kianmhz/GooseRelayVPN/releases/download/${VER}/GooseRelayVPN-client-${VER}-openwrt-${ARCH}.tar.gz
+tar -xzf GooseRelayVPN-client-${VER}-openwrt-${ARCH}.tar.gz
+cd GooseRelayVPN-client-${VER}-openwrt-${ARCH}
+
+scp goose-client root@192.168.1.1:/usr/bin/goose-client
+ssh root@192.168.1.1 "mkdir -p /etc/goose"
+scp client_config.example.json root@192.168.1.1:/etc/goose/client_config.json
+```
+
+> ⚠️ **Low-flash routers (8–16 MB):** the binary is roughly 8–12 MB depending on architecture and may not fit in internal flash. Mount a USB stick (e.g. `/mnt/sda1`), place `goose-client` and `client_config.json` there, then update the paths inside the init script in Step 5.
+
+**3. Edit the config on the router:**
+```sh
+ssh root@192.168.1.1
+vi /etc/goose/client_config.json
+```
+Fill in `script_keys` and `tunnel_key` from your Apps Script and server setup (Steps 4–5 of the main guide).
+
+By default the SOCKS listener binds to `127.0.0.1:1080`. To expose it to the LAN, set `socks_host` to `0.0.0.0` (same caveats as the LAN Sharing note below).
+
+**4. Test the binary manually before installing it as a service:**
+```sh
+chmod +x /usr/bin/goose-client
+/usr/bin/goose-client -config /etc/goose/client_config.json
+```
+When you see `ready: local SOCKS5 is listening on …` the tunnel is up. Press Ctrl+C to stop, then move on to the procd service.
+
+**5. Install the procd init script.**
+
+On the router, create `/etc/init.d/goose-client`:
+```sh
+cat > /etc/init.d/goose-client <<'EOF'
+#!/bin/sh /etc/rc.common
+# GooseRelayVPN client (managed by procd)
+
+USE_PROCD=1
+START=95
+STOP=01
+
+PROG=/usr/bin/goose-client
+CONFIG=/etc/goose/client_config.json
+
+start_service() {
+    procd_open_instance
+    procd_set_param command "$PROG" -config "$CONFIG"
+    # Respawn: within a 3600s window, wait 5s between restarts, retry forever (0 = unlimited).
+    procd_set_param respawn 3600 5 0
+    # Send stdout/stderr to the system log so `logread` can show them.
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param pidfile /var/run/goose-client.pid
+    procd_close_instance
+}
+
+reload_service() {
+    stop
+    start
+}
+EOF
+chmod +x /etc/init.d/goose-client
+```
+
+**6. Enable and start the service:**
+```sh
+/etc/init.d/goose-client enable      # auto-start on reboot
+/etc/init.d/goose-client start
+```
+
+All standard procd actions now work:
+```sh
+/etc/init.d/goose-client start       # start
+/etc/init.d/goose-client stop        # stop
+/etc/init.d/goose-client restart     # stop + start
+/etc/init.d/goose-client reload      # re-read config (stop + start under the hood)
+/etc/init.d/goose-client status      # running / not running
+/etc/init.d/goose-client disable     # remove from boot
+```
+
+**7. View logs:**
+```sh
+logread -e goose-client              # all client log lines so far
+logread -f -e goose-client           # follow live
+```
+After a reboot the service starts automatically (thanks to the symlink that `enable` creates in `/etc/rc.d/`), and procd respawns it within 5 seconds if it ever exits.
+
+**8. Point your LAN clients at the tunnel.**
+
+With `socks_host: "0.0.0.0"`, any device on the LAN can use `socks5://<router-ip>:1080` directly. For a fully transparent setup (every connection forced through the tunnel with no per-device config), pair this with a transparent-proxy package like [redsocks](https://openwrt.org/packages/pkgdata/redsocks) or a sing-box/v2ray transparent rule set — those are outside the scope of this guide.
+
+---
+
 ## LAN Sharing (Optional)
 
 By default the client listens on `127.0.0.1:1080` so only your computer can use it. To share with other devices on your local network, set `socks_host` to `0.0.0.0` in `client_config.json` and restart.
